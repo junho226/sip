@@ -6,7 +6,7 @@ import uuid
 import re
 from datetime import datetime
 from struct import *
-from multiprocessing import Process, Value
+from threading import Thread, Event
 
 
 class sip():
@@ -15,7 +15,7 @@ class sip():
         self.mno = mno
         self.headers = {}
         self.ip_from = '2001:4430:f5:ebf0::58a:a1b'
-        self.ip_to = '2001:4430:5:401::31'
+        self.ip_to = '2001:4430:5:401::26'
         self.user_agent = 'TTA-VoLTE/1.0 SM-N910S/SA1 Device_Type/Android_Phone SKT'
         self.src_num = '01076587539'
         self.dst_num = '01084647530'
@@ -148,7 +148,7 @@ Content-Length: 0
         tag = random.getrandbits(32)
         branch = 'z9hG4bK' + str(random.getrandbits(32))
         ip_from = '2001:4430:f5:ebf0::58a:a1b'
-        ip_to = '2001:4430:5:401::31'
+        ip_to = '2001:4430:5:401::26'
         model = 'SM-N910S'
         call_id = str(uuid.uuid4())
         cell_id = 4500690010920611
@@ -291,7 +291,7 @@ Content-Length: {content_length}
         tag = random.getrandbits(32)
         branch = 'z9hG4bK' + str(random.getrandbits(32))+'smg'
         ip_from = '2001:4430:f5:ebf0::58a:a1b'
-        ip_to = '2001:4430:5:401::31'
+        ip_to = '2001:4430:5:401::26'
         model = 'SM-N910S'
         call_id = str(uuid.uuid4())
         cell_id = 4500690010920611
@@ -373,7 +373,20 @@ class rtp():
         # return start + pack('!HII', seq%65536, timestamp, ssrc) + payload
         return start + pack('!HII', seq%65536, timestamp, ssrc) + sid
 
-    def send_rtp(self, ip, port, src_port, flag):
+    def send_audio(self, ip, port, src_port):
+        rtp = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+        rtp.setsockopt(socket.SOL_SOCKET, 25, b'rmnet0')
+        rtp.bind(('', src_port))
+        
+        with open('audio_test.txt', 'rb') as f:
+            payloads = f.readlines()
+        
+        for payload in payloads:
+            rtp.sendto(payload[:-1], (ip, port))
+            time.sleep(0.02)
+        
+
+    def send_rtp(self, ip, port, src_port, e):
         rtp = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
         rtp.setsockopt(socket.SOL_SOCKET, 25, b'rmnet0')
         rtp.bind(('', src_port))
@@ -383,39 +396,38 @@ class rtp():
         timegap = 320
         seq = 1
         
-        print(ssrc)
-        print(timestamp)
-        
-        payload = self.create_dummy(seq, timestamp, ssrc)
         for i in range(100):
-            
+            payload = self.create_dummy(seq, timestamp, ssrc)
             rtp.sendto(payload, (ip, port))
             seq += 1
             timestamp += timegap
             time.sleep(0.02)
         
-        flag.value = False
-    
-    def receive_rtp(self, flag):
+            
+    def receive_rtp(self, ip, e):
         rtp = socket.socket(socket.AF_INET6, socket.SOCK_RAW, socket.IPPROTO_UDP)
         rtp.setsockopt(socket.SOL_SOCKET, 25, b'rmnet0')
         rtp.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         
-        
-        with open('music.txt', 'wb') as f:
-            while flag.value:
+        with open('audio_test2.txt', 'wb') as f:
+            while not e.is_set():
                 data, addr = rtp.recvfrom(65565)
-                f.write(data)
+                f.write(data[8:]+b'\n')
+                print(addr)
+                print(data)
                 
-            
+        print("Finished")
     
-    def start_session(self, ip, port, src_port):
+    
+    def start_session(self, ip, port, src_port, e):
         
-        flag = Value('i', True)
+        # self.send_audio(ip, port, src_port)        
         
-        sender = Process(target = self.send_rtp, args = (ip, port, src_port, flag,))
+        ############## For RTP packet capture ###############
+        
+        sender = Thread(target = self.send_rtp, args = (ip, port, src_port, e,))
+        receiver = Thread(target = self.receive_rtp, args=(ip, e,))
         sender.start()
-        receiver = Process(target = self.receive_rtp, args = (flag,))
         receiver.start()
         sender.join()
         receiver.join()
@@ -423,7 +435,7 @@ class rtp():
 
 def main():
     # sip_addr = "125.144.112.66"
-    sip_addr = "2001:4430:5:401::31"
+    sip_addr = "2001:4430:5:401::26"
     sip_port = 5060
 
     receiver = socket.socket(socket.AF_INET6, socket.SOCK_RAW, socket.IPPROTO_UDP)
@@ -447,6 +459,8 @@ def main():
     sender.sendto(payload, (sip_addr, sip_port))
     print(payload, '\n\n')
     t = time.time()
+        
+    e = Event()
     
     while True:
         data, addr = receiver.recvfrom(65565)
@@ -505,7 +519,7 @@ def main():
                     print(ip, port, '\n')
                     # r.send_rtp(ip, port, src_port=1230)
                     # r.receive_rtp()
-                    r.start_session(ip, port, src_port=1230)
+                    r.start_session(ip, port, src_port=1230, e=e)
                     
             elif code in ['380', '401', '403', '408', '481', '500', '487']:
                 packet_ack, headers = s.create_ack()
@@ -520,6 +534,8 @@ def main():
                 return
                 
         elif response == 'BYE':
+            e.set()
+            print("e set")
             return
         
         else:
